@@ -1,0 +1,61 @@
+#!/bin/sh
+#
+# Enable the internal Wi-Fi by default, hardened, while reusing the GL.iNet
+# factory SSID and key so the credentials printed on the device label keep
+# working under vanilla OpenWrt.
+#
+# Runs at first boot. If the radios are not detected yet (first-boot ordering)
+# or the key cannot be read, it exits non-zero so OpenWrt retries it on the
+# next boot -- a uci-defaults script is only removed once it exits 0.
+#
+# NOTE: the Wi-Fi path cannot be exercised by the QEMU pipeline (the armsr VM
+# has no radios); this is verified on hardware only.
+
+# SSID: GL convention is GL-MT3000-XXX where XXX is the last 3 hex digits of
+# the device MAC (label-mac-device = gmac0 = eth0).
+mac=$(tr -d ':' < /sys/class/net/eth0/address | tr 'A-Z' 'a-z')
+ssid="GL-MT3000-$(printf %s "$mac" | tail -c 3)"
+
+# Key: read from the read-only Factory partition (survives sysupgrade). Layout
+# is 32 hex chars (device key + serial) immediately followed by the printed
+# Wi-Fi key. The secret stays on the device and never enters the repo.
+factory=$(sed -n 's/^\(mtd[0-9]*\): .*"Factory"$/\1/p' /proc/mtd)
+key=$(grep -aoE '[0-9a-f]{32}[A-Z0-9]{8,16}' "/dev/$factory" 2>/dev/null \
+      | head -n1 | cut -c33-)
+
+# Never bring up a weak/open network: bail (and retry next boot) if no key.
+if [ "${#key}" -lt 8 ]; then
+	logger -t beryl-wifi "factory Wi-Fi key not found; will retry on next boot"
+	exit 1
+fi
+
+# Ensure the wireless config exists (generated from radio detection).
+[ -f /etc/config/wireless ] || wifi config
+
+# No radios detected yet (first-boot ordering) -> retry on next boot.
+radios=$(uci show wireless 2>/dev/null \
+	| sed -n 's/^wireless\.\(radio[0-9]*\)=wifi-device$/\1/p')
+[ -n "$radios" ] || { logger -t beryl-wifi "no radios yet; will retry"; exit 1; }
+
+# Replace any auto-generated interfaces with our hardened AP on every radio.
+while uci -q delete wireless.@wifi-iface[0]; do :; done
+
+idx=0
+for radio in $radios; do
+	uci set wireless."${radio}".disabled='0'
+	name="wifinet${idx}"
+	uci set wireless."${name}"=wifi-iface
+	uci set wireless."${name}".device="${radio}"
+	uci set wireless."${name}".mode='ap'
+	uci set wireless."${name}".network='lan'
+	uci set wireless."${name}".ssid="${ssid}"
+	uci set wireless."${name}".encryption='sae-mixed'   # WPA3-SAE / WPA2-PSK
+	uci set wireless."${name}".key="${key}"
+	uci set wireless."${name}".wps_pushbutton='0'        # WPS off
+	idx=$((idx + 1))
+done
+
+uci commit wireless
+wifi reload
+
+exit 0
