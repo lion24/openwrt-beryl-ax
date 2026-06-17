@@ -1,0 +1,242 @@
+name: Build OpenWrt for Beryl AX
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: "OpenWrt release version"
+        required: true
+        default: "25.12.4"
+      target:
+        description: "OpenWrt target/subtarget"
+        required: true
+        default: "mediatek/filogic"
+      profile:
+        description: "Device profile"
+        required: true
+        default: "glinet_gl-mt3000"
+      cache_epoch:
+        description: "Bump this to force a fresh ImageBuilder cache"
+        required: true
+        default: "1"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build sysupgrade image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    env:
+      OPENWRT_VERSION: ${{ inputs.openwrt_version }}
+      TARGET: ${{ inputs.target }}
+      PROFILE: ${{ inputs.profile }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ca-certificates \
+            curl \
+            file \
+            gawk \
+            gettext \
+            git \
+            libncurses-dev \
+            libssl-dev \
+            python3 \
+            rsync \
+            unzip \
+            wget \
+            xsltproc \
+            zlib1g-dev \
+            zstd
+
+      - name: Prepare ImageBuilder variables
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TARGET_SLUG="${TARGET/\//-}"
+          IB_TARBALL="openwrt-imagebuilder-${OPENWRT_VERSION}-${TARGET_SLUG}.Linux-x86_64.tar.zst"
+          IB_CACHE_DIR="${GITHUB_WORKSPACE}/.cache/imagebuilder/${OPENWRT_VERSION}/${TARGET_SLUG}"
+          BASE_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}"
+
+          echo "TARGET_SLUG=${TARGET_SLUG}" >> "$GITHUB_ENV"
+          echo "IB_TARBALL=${IB_TARBALL}" >> "$GITHUB_ENV"
+          echo "IB_CACHE_DIR=${IB_CACHE_DIR}" >> "$GITHUB_ENV"
+          echo "BASE_URL=${BASE_URL}" >> "$GITHUB_ENV"
+
+      - name: Restore cached ImageBuilder
+        id: cache-imagebuilder
+        uses: actions/cache@v4
+        with:
+          path: .cache/imagebuilder/${{ inputs.openwrt_version }}/${{ env.TARGET_SLUG }}
+          key: imagebuilder-${{ runner.os }}-${{ inputs.openwrt_version }}-${{ env.TARGET_SLUG }}-${{ inputs.cache_epoch }}
+
+      - name: Download, verify, and extract ImageBuilder
+        if: steps.cache-imagebuilder.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "${IB_CACHE_DIR}"
+
+          curl -fSLO "${BASE_URL}/sha256sums"
+          curl -fSLO "${BASE_URL}/${IB_TARBALL}"
+
+          EXPECTED_SHA="$(grep -F "${IB_TARBALL}" sha256sums | awk '{print $1}' | head -n 1)"
+
+          if [ -z "${EXPECTED_SHA}" ]; then
+            echo "ERROR: could not find checksum for ${IB_TARBALL}"
+            grep -F "imagebuilder" sha256sums || true
+            exit 1
+          fi
+
+          ACTUAL_SHA="$(sha256sum "${IB_TARBALL}" | awk '{print $1}')"
+
+          echo "Expected: ${EXPECTED_SHA}"
+          echo "Actual:   ${ACTUAL_SHA}"
+
+          if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
+            echo "ERROR: checksum mismatch"
+            exit 1
+          fi
+
+          echo "Checksum OK"
+
+          tar --use-compress-program=unzstd -xf "${IB_TARBALL}" -C "${IB_CACHE_DIR}" --strip-components=1
+
+      - name: Set ImageBuilder directory
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f "${IB_CACHE_DIR}/Makefile" || {
+            echo "ERROR: ImageBuilder cache dir is invalid: ${IB_CACHE_DIR}"
+            ls -lah "${IB_CACHE_DIR}" || true
+            exit 1
+          }
+
+          echo "IB_DIR=${IB_CACHE_DIR}" >> "$GITHUB_ENV"
+
+      - name: Build image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PACKAGES="$(tr '\n' ' ' < packages.txt)"
+
+          make -C "${IB_DIR}" image \
+            PROFILE="${PROFILE}" \
+            PACKAGES="${PACKAGES}" \
+            FILES="${GITHUB_WORKSPACE}/files"
+
+      - name: Collect release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf artifacts
+          mkdir -p artifacts
+
+          find "${IB_DIR}/bin/targets" -type f \
+            \( -name "*gl-mt3000*sysupgrade*" \
+            -o -name "*gl-mt3000*factory*" \
+            -o -name "*.manifest" \
+            -o -name "profiles.json" \
+            -o -name "sha256sums" \) \
+            -exec cp -v {} artifacts/ \;
+
+          if [ -f artifacts/sha256sums ]; then
+            mv artifacts/sha256sums artifacts/openwrt-sha256sums.txt
+          fi
+
+          (
+            cd artifacts
+            sha256sum * > release-sha256sums.txt
+          )
+
+          echo "Release assets:"
+          find artifacts -maxdepth 1 -type f -printf '%f\n' | sort
+
+          echo "Checking for duplicate asset names:"
+          find artifacts -maxdepth 1 -type f -printf '%f\n' | sort | uniq -d | tee /tmp/duplicate-assets.txt
+
+          if [ -s /tmp/duplicate-assets.txt ]; then
+            echo "ERROR: duplicate release asset names detected"
+            cat /tmp/duplicate-assets.txt
+            exit 1
+          fi
+
+          ls -lah artifacts
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-beryl-ax-${{ inputs.openwrt_version }}
+          path: artifacts/
+          if-no-files-found: error
+
+      - name: Create GitHub release
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          TARGET_SAFE="${TARGET//\//-}"
+
+          RELEASE_TAG="openwrt-${OPENWRT_VERSION}-${TARGET_SAFE}-build-${{ github.run_number }}.${{ github.run_attempt }}"
+          RELEASE_TITLE="OpenWrt ${OPENWRT_VERSION} for GL-MT3000 - build ${{ github.run_number }}.${{ github.run_attempt }}"
+
+          cat > RELEASE_NOTES.md <<EOF
+          # ${RELEASE_TITLE}
+
+          Automated OpenWrt build for the GL.iNet Beryl AX / GL-MT3000.
+
+          ## Build metadata
+
+          - OpenWrt version: \`${OPENWRT_VERSION}\`
+          - Target: \`${TARGET}\`
+          - Profile: \`${PROFILE}\`
+          - Commit: \`${SHORT_SHA}\`
+          - Workflow run: \`${{ github.run_number }}\`
+          - Run attempt: \`${{ github.run_attempt }}\`
+
+          ## Flashing note
+
+          Use the \`*sysupgrade.bin\` image for upgrading an existing OpenWrt installation.
+
+          When migrating from GL.iNet firmware to vanilla OpenWrt, flash carefully, use Ethernet, and do not keep vendor settings.
+          EOF
+
+          echo "Repository: ${GITHUB_REPOSITORY}"
+          echo "Release tag: ${RELEASE_TAG}"
+
+          gh repo view "${GITHUB_REPOSITORY}" --json nameWithOwner,url
+
+          gh release create "${RELEASE_TAG}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "${RELEASE_TITLE}" \
+            --notes-file RELEASE_NOTES.md \
+            --latest
+
+          echo "Uploading assets..."
+
+          find artifacts -maxdepth 1 -type f -print0 | sort -z | while IFS= read -r -d '' file; do
+            echo "Uploading ${file}"
+            gh release upload "${RELEASE_TAG}" "${file}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+          done
