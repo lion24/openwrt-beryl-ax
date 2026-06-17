@@ -1,0 +1,14 @@
+#!/bin/sh
+
+uci set system.@system[0].hostname='beryl-ax-travel'
+
+# Keep GL.iNet-like LAN addressing, useful when you are used to 192.168.8.1.
+# Must be CIDR: a bare address can leave the interface at /32 (when the base
+# image carries the prefix in ipaddr instead of a separate netmask), which cuts
+# off the 192.168.8.0/24 LAN and makes the router unreachable.
+uci set network.lan.ipaddr='192.168.8.1/24'
+
+uci commit system
+uci commit network
+
+exit 0
