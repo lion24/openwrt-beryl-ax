@@ -227,7 +227,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          PACKAGES="$(tr '\n' ' ' < packages.txt)"
+          # Strip comments (# ... ) and blank lines before flattening, otherwise
+          # comment words leak into the package list and break the build.
+          PACKAGES="$(sed 's/#.*//' packages.txt | tr '\n' ' ')"
 
           make -C "${IB_DIR}" image \
             PROFILE="${PROFILE}" \

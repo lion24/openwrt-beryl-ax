@@ -42,7 +42,15 @@ while uci -q delete wireless.@wifi-iface[0]; do :; done
 
 idx=0
 for radio in $radios; do
+	# Enable every detected radio. USB adapters (e.g. Panda PAU09 / rt2800usb)
+	# are reserved for the travelmate client uplink (STA): keep the radio on so
+	# travelmate can attach a station to it, but skip the clone AP below so the
+	# label SSID is never broadcast on USB.
 	uci set wireless."${radio}".disabled='0'
+	case "$(uci -q get wireless."${radio}".path)" in
+		*usb*) continue ;;
+	esac
+
 	name="wifinet${idx}"
 	uci set wireless."${name}"=wifi-iface
 	uci set wireless."${name}".device="${radio}"

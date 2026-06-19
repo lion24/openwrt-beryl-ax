@@ -1,0 +1,42 @@
+#!/bin/sh
+#
+# Prepare the device to use a Wi-Fi client uplink (the Panda PAU09 USB adapter)
+# via travelmate. This lays only the plumbing:
+#   - the trm_wwan DHCP interface travelmate manages,
+#   - its membership in the wan firewall zone (NAT + untrusted),
+#   - travelmate's global section, armed.
+#
+# It deliberately does NOT configure any upstream SSID/key: those are
+# location-specific secrets that must be added at runtime
+# (LuCI -> Services -> Travelmate -> scan & add uplink), never baked into the
+# image. With no uplink configured the travelmate daemon simply idles.
+#
+# Idempotent and safe to re-run; one-shot (exits 0).
+
+# 1. Uplink interface travelmate brings up as a DHCP client.
+if ! uci -q get network.trm_wwan >/dev/null; then
+	uci set network.trm_wwan='interface'
+	uci set network.trm_wwan.proto='dhcp'
+fi
+
+# 2. Place it in the wan zone so it is masqueraded and treated as untrusted.
+#    Find the zone by name (section indexes are not stable) and add the network
+#    without duplicating it.
+wan=$(uci show firewall | sed -n "s/^firewall\.\(@zone\[[0-9]*\]\)\.name='wan'\$/\1/p")
+if [ -n "$wan" ]; then
+	uci -q del_list firewall."${wan}".network='trm_wwan'
+	uci add_list firewall."${wan}".network='trm_wwan'
+else
+	logger -t beryl-travelmate "wan firewall zone not found; trm_wwan left unzoned"
+fi
+
+# 3. Point travelmate at the interface and arm it. Idle until an uplink exists.
+uci -q get travelmate.global >/dev/null || uci set travelmate.global='travelmate'
+uci set travelmate.global.trm_iface='trm_wwan'
+uci set travelmate.global.trm_enabled='1'
+
+uci commit network
+uci commit firewall
+uci commit travelmate
+
+exit 0
