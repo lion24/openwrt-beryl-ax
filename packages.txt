@@ -27,3 +27,9 @@ kmod-mt76-usb
 kmod-mt76x2u
 
 gl-fan
+
+lm-sensors
+lm-sensors-detect
+luci-app-statistics
+collectd-mod-thermal
+htop
