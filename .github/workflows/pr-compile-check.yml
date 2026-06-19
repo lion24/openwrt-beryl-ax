@@ -17,10 +17,9 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # A real OpenWrt release is required so the SDK is downloadable. This only
-  # validates that the package compiles and is independent of the version the
-  # image is ultimately built with.
-  OPENWRT_VERSION: "24.10.3"
+  # Match the release the image is built with (build-openwrt.yml default) so
+  # the package is validated against the same SDK toolchain.
+  OPENWRT_VERSION: "25.12.4"
   TARGET: "mediatek/filogic"
   TARGET_SLUG: "mediatek-filogic"
 
