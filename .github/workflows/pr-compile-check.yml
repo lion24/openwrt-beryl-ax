@@ -1,8 +1,9 @@
 name: PR compile check
 
-# Lightweight gate for pull requests: verify the gl-fan source compiles
-# cleanly (host + target arch) without building any firmware artifacts.
-# The full SDK/ImageBuilder build lives in build-openwrt.yml.
+# Pull-request gate: verify the gl-fan package compiles successfully against
+# the real OpenWrt SDK (musl cross-toolchain for mediatek/filogic).
+# It builds NO firmware artifacts and does not run the ImageBuilder; the full
+# image build lives in build-openwrt.yml.
 
 on:
   pull_request:
@@ -15,33 +16,107 @@ concurrency:
   group: pr-compile-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # A real OpenWrt release is required so the SDK is downloadable. This only
+  # validates that the package compiles and is independent of the version the
+  # image is ultimately built with.
+  OPENWRT_VERSION: "24.10.3"
+  TARGET: "mediatek/filogic"
+  TARGET_SLUG: "mediatek-filogic"
+
 jobs:
-  compile:
-    name: Compile gl-fan (no artifacts)
+  sdk-compile:
+    name: Compile gl-fan with the SDK (no artifacts)
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install aarch64 cross toolchain
+      - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y \
+            build-essential ca-certificates curl file gawk gettext git \
+            libncurses-dev libssl-dev python3 rsync unzip wget xsltproc \
+            zlib1g-dev zstd
 
-      - name: Compile gl_fan (host gcc, warnings as errors)
+      - name: Quick source compile (fast warning gate)
         run: |
           gcc -Wall -Wextra -Werror -O2 \
             -o /tmp/gl_fan-host package/gl-fan/src/gl_fan.c
-          echo "host build OK"
+          echo "source compiles cleanly with -Werror"
 
-      - name: Compile gl_fan (aarch64 cross, warnings as errors)
+      - name: Prepare SDK variables
+        shell: bash
         run: |
-          aarch64-linux-gnu-gcc -Wall -Wextra -Werror -O2 \
-            -o /tmp/gl_fan-aarch64 package/gl-fan/src/gl_fan.c
-          file /tmp/gl_fan-aarch64
+          set -euo pipefail
+
+          BASE_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}"
+          SDK_CACHE_DIR="${GITHUB_WORKSPACE}/.cache/sdk/${OPENWRT_VERSION}/${TARGET_SLUG}"
+
+          echo "BASE_URL=${BASE_URL}" >> "$GITHUB_ENV"
+          echo "SDK_CACHE_DIR=${SDK_CACHE_DIR}" >> "$GITHUB_ENV"
+
+      - name: Restore cached SDK
+        id: cache-sdk
+        uses: actions/cache@v4
+        with:
+          path: .cache/sdk/${{ env.OPENWRT_VERSION }}/${{ env.TARGET_SLUG }}
+          key: sdk-${{ runner.os }}-${{ env.OPENWRT_VERSION }}-${{ env.TARGET_SLUG }}
+
+      - name: Download, verify, and extract SDK
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "${SDK_CACHE_DIR}"
+
+          curl -fSLO "${BASE_URL}/sha256sums"
+
+          # The SDK tarball name carries a toolchain suffix (e.g.
+          # ..._gcc-13.3.0_musl...), so read the exact name from sha256sums
+          # rather than constructing it.
+          SDK_TARBALL="$(grep -oE 'openwrt-sdk-[^ ]*Linux-x86_64\.tar\.(zst|xz)' sha256sums | head -n 1)"
+          [ -n "${SDK_TARBALL}" ] || { echo "ERROR: no SDK tarball listed in sha256sums"; exit 1; }
+          echo "SDK tarball: ${SDK_TARBALL}"
+
+          curl -fSLO "${BASE_URL}/${SDK_TARBALL}"
+
+          EXPECTED_SHA="$(grep -F "${SDK_TARBALL}" sha256sums | awk '{print $1}' | head -n 1)"
+          ACTUAL_SHA="$(sha256sum "${SDK_TARBALL}" | awk '{print $1}')"
+
+          echo "Expected: ${EXPECTED_SHA}"
+          echo "Actual:   ${ACTUAL_SHA}"
+          [ "${EXPECTED_SHA}" = "${ACTUAL_SHA}" ] || { echo "ERROR: SDK checksum mismatch"; exit 1; }
+          echo "SDK checksum OK"
+
+          case "${SDK_TARBALL}" in
+            *.tar.zst) tar --use-compress-program=unzstd -xf "${SDK_TARBALL}" -C "${SDK_CACHE_DIR}" --strip-components=1 ;;
+            *.tar.xz)  tar -xJf "${SDK_TARBALL}" -C "${SDK_CACHE_DIR}" --strip-components=1 ;;
+            *) echo "ERROR: unknown SDK archive format: ${SDK_TARBALL}"; exit 1 ;;
+          esac
+
+      - name: Compile gl-fan package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f "${SDK_CACHE_DIR}/rules.mk" || {
+            echo "ERROR: SDK cache dir is invalid: ${SDK_CACHE_DIR}"
+            ls -lah "${SDK_CACHE_DIR}" || true
+            exit 1
+          }
+
+          rm -rf "${SDK_CACHE_DIR}/package/gl-fan"
+          cp -r "${GITHUB_WORKSPACE}/package/gl-fan" "${SDK_CACHE_DIR}/package/gl-fan"
+
+          make -C "${SDK_CACHE_DIR}" defconfig
+          make -C "${SDK_CACHE_DIR}" package/gl-fan/compile V=s -j"$(nproc)"
+
+          echo "Built package(s):"
+          find "${SDK_CACHE_DIR}/bin" -type f \( -name 'gl-fan_*.ipk' -o -name 'gl-fan-*.apk' \) -print | grep .
 
       - name: Check init script shell syntax
-        run: |
-          sh -n package/gl-fan/files/gl_fan.init
-          echo "init script syntax OK"
+        run: sh -n package/gl-fan/files/gl_fan.init

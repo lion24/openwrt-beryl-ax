@@ -132,10 +132,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          SDK_TARBALL="openwrt-sdk-${OPENWRT_VERSION}-${TARGET_SLUG}.Linux-x86_64.tar.zst"
           SDK_CACHE_DIR="${GITHUB_WORKSPACE}/.cache/sdk/${OPENWRT_VERSION}/${TARGET_SLUG}"
 
-          echo "SDK_TARBALL=${SDK_TARBALL}" >> "$GITHUB_ENV"
           echo "SDK_CACHE_DIR=${SDK_CACHE_DIR}" >> "$GITHUB_ENV"
 
       - name: Restore cached SDK
@@ -154,16 +152,17 @@ jobs:
           mkdir -p "${SDK_CACHE_DIR}"
 
           curl -fSLO "${BASE_URL}/sha256sums"
+
+          # The SDK tarball name carries a toolchain suffix (e.g.
+          # ..._gcc-13.3.0_musl...), so read the exact name from sha256sums
+          # rather than constructing it.
+          SDK_TARBALL="$(grep -oE 'openwrt-sdk-[^ ]*Linux-x86_64\.tar\.(zst|xz)' sha256sums | head -n 1)"
+          [ -n "${SDK_TARBALL}" ] || { echo "ERROR: no SDK tarball listed in sha256sums"; exit 1; }
+          echo "SDK tarball: ${SDK_TARBALL}"
+
           curl -fSLO "${BASE_URL}/${SDK_TARBALL}"
 
           EXPECTED_SHA="$(grep -F "${SDK_TARBALL}" sha256sums | awk '{print $1}' | head -n 1)"
-
-          if [ -z "${EXPECTED_SHA}" ]; then
-            echo "ERROR: could not find checksum for ${SDK_TARBALL}"
-            grep -F "sdk" sha256sums || true
-            exit 1
-          fi
-
           ACTUAL_SHA="$(sha256sum "${SDK_TARBALL}" | awk '{print $1}')"
 
           echo "Expected: ${EXPECTED_SHA}"
@@ -176,7 +175,11 @@ jobs:
 
           echo "SDK checksum OK"
 
-          tar --use-compress-program=unzstd -xf "${SDK_TARBALL}" -C "${SDK_CACHE_DIR}" --strip-components=1
+          case "${SDK_TARBALL}" in
+            *.tar.zst) tar --use-compress-program=unzstd -xf "${SDK_TARBALL}" -C "${SDK_CACHE_DIR}" --strip-components=1 ;;
+            *.tar.xz)  tar -xJf "${SDK_TARBALL}" -C "${SDK_CACHE_DIR}" --strip-components=1 ;;
+            *) echo "ERROR: unknown SDK archive format: ${SDK_TARBALL}"; exit 1 ;;
+          esac
 
       - name: Build gl-fan package with the SDK
         shell: bash
