@@ -9,12 +9,13 @@
  * Sysfs nodes:
  *   read  CPU temp      : -T path (default thermal_zone0/temp)
  *   write fan PWM       : /sys/class/thermal/cooling_device0/cur_state
- *   read  fan tach (-s) : /sys/class/fan/fan_speed            [vendor kernel]
+ *   read  fan tach (-s) : /sys/class/hwmon/hwmonN/fan1_input
  *   read  PWM ceiling   : /proc/gl-hw-info/fan_pwm_max         [vendor kernel]
  *
- * The last two nodes are provided by the GL.iNet vendor kernel driver
- * (gl_fan_driver) and are absent on vanilla OpenWrt; the PWM ceiling
- * then falls back to 120 and the -s tachometer read simply fails.
+ * The tachometer is read from the standard hwmon interface present on
+ * stock OpenWrt. The PWM ceiling node is provided by the GL.iNet vendor
+ * kernel driver (gl_fan_driver) and is absent on vanilla OpenWrt, where it
+ * falls back to a safe default of 120.
  */
 
 #define _GNU_SOURCE
@@ -22,10 +23,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <glob.h>
 #include <sys/stat.h>
 
 #define COOLING_PATH    "/sys/class/thermal/cooling_device0/cur_state"
-#define FAN_SPEED_PATH  "/sys/class/fan/fan_speed"
+#define FAN_SPEED_GLOB  "/sys/class/hwmon/hwmon*/fan1_input"
 #define FAN_PWM_MAX_PATH "/proc/gl-hw-info/fan_pwm_max"
 #define DEFAULT_TEMP_SYSFS "/sys/devices/virtual/thermal/thermal_zone0/temp"
 
@@ -116,26 +118,26 @@ static int set_fan_pwm(int val)
 	return 0;
 }
 
-/* Trigger and print the fan tachometer reading (-s). */
+/* Print the fan tachometer reading (-s) from the hwmon interface. */
 static int get_fan_speed(void)
 {
+	glob_t g;
 	char buf[128];
-	struct stat st;
+	int rc = -2;
 
-	if (stat(FAN_SPEED_PATH, &st) != 0)
+	if (glob(FAN_SPEED_GLOB, 0, NULL, &g) != 0)
 		return -2;
 
-	if (write_file(FAN_SPEED_PATH, "refresh", 7) != 1)
-		return -2;
+	if (g.gl_pathc > 0) {
+		memset(buf, 0, sizeof(buf));
+		read_file(g.gl_pathv[0], buf);
+		buf[sizeof(buf) - 1] = '\0';
+		puts(buf);
+		rc = 0;
+	}
 
-	sleep(2);
-
-	memset(buf, 0, sizeof(buf));
-	read_file(FAN_SPEED_PATH, buf);
-	buf[sizeof(buf) - 1] = '\0';
-	puts(buf);
-
-	return 0;
+	globfree(&g);
+	return rc;
 }
 
 static void usage(const char *prog)

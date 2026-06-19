@@ -91,11 +91,14 @@ recover the control logic: the same PID algorithm, default setpoints
 The source is compiled from scratch by the OpenWrt SDK during the image
 build — no vendor binary is shipped.
 
+The `-s` fan-speed readout uses the standard hwmon interface
+(`/sys/class/hwmon/hwmon*/fan1_input`) available on stock OpenWrt.
+
 Two caveats specific to vanilla OpenWrt:
 
-- the `-s` fan-speed readout and the PWM ceiling come from GL.iNet's
-  `gl_fan_driver` kernel module, which is **not present upstream**; the
-  controller falls back to a safe default ceiling and skips the tachometer;
+- the PWM ceiling comes from GL.iNet's `gl_fan_driver` kernel module, which
+  is **not present upstream**; the controller falls back to a safe default
+  ceiling of 120;
 - the loop drives the standard thermal `cooling_device0`, which the kernel
   thermal governor may also manage — verify on-device whether you want
   userspace control. The service is configured in `/etc/config/glfan` and
