@@ -209,8 +209,11 @@ jobs:
 
           mkdir -p "${IB_DIR}/packages"
 
-          # ImageBuilder pulls extra packages from its local packages/ repo.
-          # Stage both ipk (opkg-based IB) and apk (apk-based IB) just in case.
+          # ImageBuilder reads user packages from its local PACKAGE_DIR
+          # (<imagebuilder>/packages). The apk-based ImageBuilder regenerates
+          # the local index automatically (apk mkndx --allow-untrusted) when it
+          # finds files there newer than packages.adb, so a plain copy suffices.
+          # Stage whichever format the SDK produced (.apk on 25.12+, .ipk on opkg).
           found=""
           while IFS= read -r pkg; do
             cp -v "${pkg}" "${IB_DIR}/packages/"
@@ -252,6 +255,14 @@ jobs:
           if [ -f artifacts/sha256sums ]; then
             mv artifacts/sha256sums artifacts/custom-build-sha256sums.txt
           fi
+
+          # Include the locally-built gl-fan package in the release.
+          find "${IB_DIR}/packages" -maxdepth 1 -type f \
+            \( -name "gl-fan-*.apk" -o -name "gl-fan_*.ipk" \) \
+            -exec cp -v {} artifacts/ \;
+
+          ls artifacts/gl-fan* >/dev/null 2>&1 \
+            || { echo "ERROR: gl-fan package missing from artifacts"; exit 1; }
 
           echo "Downloading official OpenWrt GL-MT3000 initramfs recovery image..."
 
