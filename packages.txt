@@ -9,6 +9,8 @@ wpad-mbedtls
 
 wireguard-tools
 luci-proto-wireguard
+tailscale
+luci-app-tailscale-community
 
 curl
 ca-bundle
