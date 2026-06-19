@@ -5,6 +5,7 @@ START=99
 USE_PROCD=1
 
 PROG=/usr/bin/gl_fan
+ZONE_POLICY=/sys/class/thermal/thermal_zone0/policy
 
 get_fan_config() {
     config_get enabled $1 enabled
@@ -22,6 +23,10 @@ start_service() {
     config_foreach get_fan_config globals
 
     [ "$enabled" != "1" ] && exit
+
+    # The daemon itself claims the thermal zone (user_space) on start and
+    # restores step_wise on exit, so nothing is done here.
+
     [ -n "$sysfs" ] && PROG="$PROG -T $sysfs"
     [ -n "$div" ] && PROG="$PROG -D $div"
     [ -n "$temperature" ] && PROG="$PROG -t $temperature"
@@ -33,11 +38,15 @@ start_service() {
     procd_open_instance
     procd_set_param respawn
     procd_set_param stderr 1
+    # Give the daemon time to catch SIGTERM and restore step_wise before procd
+    # escalates to SIGKILL.
+    procd_set_param term_timeout 5
     procd_set_param command $PROG
     procd_close_instance
 }
 
 stop_service() {
-    kill -9 $(pgrep -f '/usr/bin/gl_fan') 2>/dev/null
-    echo 0 > /sys/class/thermal/cooling_device0/cur_state
+    # procd sends SIGTERM and the daemon restores step_wise itself; this only
+    # forces it back if the daemon was killed before it could.
+    [ -w "$ZONE_POLICY" ] && echo step_wise > "$ZONE_POLICY"
 }
