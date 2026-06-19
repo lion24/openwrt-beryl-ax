@@ -1,0 +1,47 @@
+name: PR compile check
+
+# Lightweight gate for pull requests: verify the gl-fan source compiles
+# cleanly (host + target arch) without building any firmware artifacts.
+# The full SDK/ImageBuilder build lives in build-openwrt.yml.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-compile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compile:
+    name: Compile gl-fan (no artifacts)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install aarch64 cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Compile gl_fan (host gcc, warnings as errors)
+        run: |
+          gcc -Wall -Wextra -Werror -O2 \
+            -o /tmp/gl_fan-host package/gl-fan/src/gl_fan.c
+          echo "host build OK"
+
+      - name: Compile gl_fan (aarch64 cross, warnings as errors)
+        run: |
+          aarch64-linux-gnu-gcc -Wall -Wextra -Werror -O2 \
+            -o /tmp/gl_fan-aarch64 package/gl-fan/src/gl_fan.c
+          file /tmp/gl_fan-aarch64
+
+      - name: Check init script shell syntax
+        run: |
+          sh -n package/gl-fan/files/gl_fan.init
+          echo "init script syntax OK"
