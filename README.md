@@ -79,6 +79,28 @@ Security is hardened compared to the vendor defaults: WPA3/WPA2 mixed
 your Wi-Fi country in LuCI per location. You can of course change the SSID
 and password afterwards in LuCI.
 
+## Fan control
+
+The Beryl AX ships with a small vendor daemon (`gl_fan`) that drives the
+fan with a PID loop. Vanilla OpenWrt does not include it, so this image
+provides a clean-room reimplementation in the `gl-fan` package.
+
+It is the result of **reverse-engineering the stock `gl_fan` binary** to
+recover the control logic: the same PID algorithm, default setpoints
+(75 °C target), sysfs paths, and `glfan` UCI options as the vendor build.
+The source is compiled from scratch by the OpenWrt SDK during the image
+build — no vendor binary is shipped.
+
+Two caveats specific to vanilla OpenWrt:
+
+- the `-s` fan-speed readout and the PWM ceiling come from GL.iNet's
+  `gl_fan_driver` kernel module, which is **not present upstream**; the
+  controller falls back to a safe default ceiling and skips the tachometer;
+- the loop drives the standard thermal `cooling_device0`, which the kernel
+  thermal governor may also manage — verify on-device whether you want
+  userspace control. The service is configured in `/etc/config/glfan` and
+  can be disabled there.
+
 ## Flashing note
 
 When migrating from GL.iNet firmware to vanilla OpenWrt, use the OpenWrt
