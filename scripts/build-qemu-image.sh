@@ -9,8 +9,10 @@
 # lets QEMU validate the configuration and userspace package selection.
 #
 # Hardware-specific kernel modules (kmod-*) are dropped: they are tied to the
-# MT7981 kernel/Wi-Fi and cannot be tested in QEMU anyway. The static layer
-# (validate-static.sh) already verifies those are present in the real image.
+# MT7981 kernel/Wi-Fi and cannot be tested in QEMU anyway. The locally built
+# gl-fan package is dropped too: it is not in the standard armsr feed and is a
+# no-op without the device's fan/thermal sysfs. The static layer
+# (validate-static.sh) already verifies all of these in the real image.
 #
 # Usage: scripts/build-qemu-image.sh <openwrt-version> <out-dir>
 # Output: <out-dir>/openwrt-armsr-qemu.img  (raw ext4-combined disk image)
@@ -58,6 +60,7 @@ test -f ib/Makefile || { echo "ERROR: extracted ImageBuilder looks invalid"; exi
 PACKAGES="$(sed 's/#.*//' "${REPO_ROOT}/packages.txt" \
   | grep -v '^[[:space:]]*$' \
   | grep -v '^kmod-' \
+  | grep -v '^gl-fan[[:space:]]*$' \
   | tr '\n' ' ')"
 echo "-- packages for QEMU build: ${PACKAGES}"
 

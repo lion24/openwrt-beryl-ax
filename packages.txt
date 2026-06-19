@@ -25,3 +25,5 @@ kmod-usb3
 kmod-mt76
 kmod-mt76-usb
 kmod-mt76x2u
+
+gl-fan
