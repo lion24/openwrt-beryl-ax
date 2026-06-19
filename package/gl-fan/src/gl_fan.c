@@ -1,21 +1,29 @@
 /*
  * gl_fan - PID fan controller for the GL.iNet Beryl AX / GL-MT3000.
  *
- * Clean-room reimplementation of the vendor /usr/bin/gl_fan daemon,
- * recovered from the stock firmware binary. It samples the CPU
- * temperature from a thermal sysfs node and drives the thermal cooling
- * device PWM with an incremental PID loop.
+ * Clean-room reimplementation of the vendor /usr/bin/gl_fan daemon. It
+ * samples the CPU temperature from a thermal sysfs node and drives the
+ * thermal cooling device with a standard positional PID loop: proportional
+ * on the temperature error, integral with anti-windup, derivative on the
+ * error's first difference. Error e = temp - target, so a hotter CPU
+ * raises the output.
+ *
+ * On stock OpenWrt the kernel thermal governor already controls this fan,
+ * so the service ships disabled. When enabled, the daemon switches the
+ * thermal zone to the "user_space" governor on start (so the kernel stops
+ * overriding the cooling state it writes) and restores "step_wise" on exit,
+ * including on a fatal signal, so the kernel always regains control.
  *
  * Sysfs nodes:
- *   read  CPU temp      : -T path (default thermal_zone0/temp)
- *   write fan PWM       : /sys/class/thermal/cooling_device0/cur_state
- *   read  fan tach (-s) : /sys/class/hwmon/hwmonN/fan1_input
- *   read  PWM ceiling   : /proc/gl-hw-info/fan_pwm_max         [vendor kernel]
+ *   read  CPU temp     : -T path (default thermal_zone0/temp, millidegrees)
+ *   write fan state    : /sys/class/thermal/cooling_device0/cur_state
+ *   read  state ceiling: /sys/class/thermal/cooling_device0/max_state
+ *   read  fan tach (-s): /sys/class/hwmon/hwmonN/fan1_input
  *
- * The tachometer is read from the standard hwmon interface present on
- * stock OpenWrt. The PWM ceiling node is provided by the GL.iNet vendor
- * kernel driver (gl_fan_driver) and is absent on vanilla OpenWrt, where it
- * falls back to a safe default of 120.
+ * Standard thermal sysfs reports millidegrees, hence the default divisor of
+ * 1000. cur_state must stay within [0, max_state], so the output ceiling is
+ * the cooling device's max_state (falling back to the vendor gl-hw-info
+ * node, then a constant).
  */
 
 #define _GNU_SOURCE
@@ -24,22 +32,24 @@
 #include <string.h>
 #include <unistd.h>
 #include <glob.h>
+#include <fcntl.h>
+#include <signal.h>
 #include <sys/stat.h>
 
 #define COOLING_PATH    "/sys/class/thermal/cooling_device0/cur_state"
+#define MAX_STATE_PATH  "/sys/class/thermal/cooling_device0/max_state"
+#define POLICY_PATH     "/sys/class/thermal/thermal_zone0/policy"
 #define FAN_SPEED_GLOB  "/sys/class/hwmon/hwmon*/fan1_input"
 #define FAN_PWM_MAX_PATH "/proc/gl-hw-info/fan_pwm_max"
 #define DEFAULT_TEMP_SYSFS "/sys/devices/virtual/thermal/thermal_zone0/temp"
 
-#define DEF_DIV     10
-#define DEF_TARGET  75
-#define DEF_KP      10
-#define DEF_KI      2
-#define DEF_KD      10
+#define DEF_DIV     1000  /* thermal sysfs reports millidegrees Celsius */
+#define DEF_TARGET  60    /* PID baseline, deg C; fan ramps above it    */
+#define DEF_KP      0.1f  /* gains tuned for a coarse pwm-fan (0..3):   */
+#define DEF_KI      0.0f  /* P-only curve, ~1 fan step per 10 deg C;    */
+#define DEF_KD      0.0f  /* enable I/D via UCI if wanted               */
 
 #define PWM_MAX_FALLBACK 120
-#define INTEGRAL_CEIL    120   /* hard cap on the integral accumulator   */
-#define WINDUP_RESET     -4    /* dump integral once temp is this far below target */
 #define LOOP_PERIOD      20    /* seconds between control updates         */
 #define SPINDOWN_HOLD    300   /* seconds to hold before cutting the fan  */
 
@@ -64,6 +74,20 @@ static int read_file(const char *path, char *dst)
 	fclose(f);
 	free(line);
 	return 0;
+}
+
+/* Read a small integer from a sysfs/proc file. Returns 0 if absent. */
+static int read_int_file(const char *path)
+{
+	char buf[128];
+	struct stat st;
+
+	if (stat(path, &st) != 0)
+		return 0;
+
+	memset(buf, 0, sizeof(buf));
+	read_file(path, buf);
+	return atoi(buf);
 }
 
 /* Write a buffer to a file as a single fwrite item.
@@ -118,6 +142,38 @@ static int set_fan_pwm(int val)
 	return 0;
 }
 
+/* Async-signal-safe: hand the thermal zone back to the kernel governor and
+ * exit. Used as the handler for both graceful and fatal signals so the fan
+ * never ends up in user_space with no daemon driving it. */
+static void on_signal(int sig)
+{
+	int fd = open(POLICY_PATH, O_WRONLY);
+
+	if (fd >= 0) {
+		ssize_t n = write(fd, "step_wise\n", 10);
+		(void)n;
+		close(fd);
+	}
+	_exit(128 + sig);
+}
+
+/* Switch the thermal zone to userspace control and arrange to restore the
+ * kernel governor on exit. No-op if the policy node is missing/not writable. */
+static void claim_thermal_zone(void)
+{
+	struct sigaction sa;
+
+	if (write_file(POLICY_PATH, "user_space\n", sizeof("user_space\n") - 1) != 1)
+		return;
+
+	memset(&sa, 0, sizeof(sa));
+	sa.sa_handler = on_signal;
+	sigaction(SIGINT, &sa, NULL);
+	sigaction(SIGTERM, &sa, NULL);
+	sigaction(SIGSEGV, &sa, NULL);
+	sigaction(SIGABRT, &sa, NULL);
+}
+
 /* Print the fan tachometer reading (-s) from the hwmon interface. */
 static int get_fan_speed(void)
 {
@@ -147,9 +203,9 @@ static void usage(const char *prog)
 		"          -T sysfs         # temperature sysfs path, default is %s\n"
 		"          -D div         # temperature divide, default is %d\n"
 		"          -t temperature   # expected CPU temperature, default is %d\n"
-		"          -p proportion    # Proportion parameter in PID algorithm, default is %d\n"
-		"          -i integration   # integration parameter in PID algorithm, default is %d\n"
-		"          -d differential  # differential parameter in PID algorithm, default is %d\n"
+		"          -p proportion    # Proportion parameter in PID algorithm, default is %g\n"
+		"          -i integration   # integration parameter in PID algorithm, default is %g\n"
+		"          -d differential  # differential parameter in PID algorithm, default is %g\n"
 		"          -s               # print fan speed\n"
 		"          -v               # verbose\n",
 		prog, g_temp_path, g_div, DEF_TARGET, DEF_KP, DEF_KI, DEF_KD);
@@ -160,18 +216,15 @@ int main(int argc, char **argv)
 	int target = DEF_TARGET;
 	float kp = DEF_KP, ki = DEF_KI, kd = DEF_KD;
 	int pwm_max;
-	struct stat st;
 	int opt;
 
-	/* PWM ceiling from the vendor node, or a safe fallback. */
-	if (stat(FAN_PWM_MAX_PATH, &st) == 0) {
-		char buf[128];
-		memset(buf, 0, sizeof(buf));
-		read_file(FAN_PWM_MAX_PATH, buf);
-		pwm_max = atoi(buf);
-	} else {
+	/* cur_state must stay within [0, max_state]; prefer the cooling
+	 * device's own ceiling, then the vendor node, then a safe constant. */
+	pwm_max = read_int_file(MAX_STATE_PATH);
+	if (pwm_max <= 0)
+		pwm_max = read_int_file(FAN_PWM_MAX_PATH);
+	if (pwm_max <= 0)
 		pwm_max = PWM_MAX_FALLBACK;
-	}
 
 	while ((opt = getopt(argc, argv, "T:D:t:p:i:d:vs")) != -1) {
 		switch (opt) {
@@ -206,9 +259,10 @@ int main(int argc, char **argv)
 		}
 	}
 
+	claim_thermal_zone();
 	set_fan_pwm(0);
 
-	int e = 0, e1 = 0, e2 = 0;   /* error, e[-1], e[-2] */
+	int e_prev = 0;
 	int integral = 0;
 	float prev_out = 0.0f;
 
@@ -216,29 +270,24 @@ int main(int argc, char **argv)
 		int temp;
 
 		if (get_cpu_temp(&temp) != 0) {
-			/* keep the rolling error window intact, skip this update */
-			e = e1;
-			e1 = e2;
-			goto nap;
+			sleep(LOOP_PERIOD);
+			continue;
 		}
 
-		e = temp - target;
+		int e = temp - target;   /* > 0 when hotter than target */
 
-		/* integral accumulator, clamped to [0, INTEGRAL_CEIL] with
-		 * anti-windup reset once we drop well below target */
-		int cand = integral + e;
-		if (cand > INTEGRAL_CEIL)
-			integral = INTEGRAL_CEIL;
-		else if (cand < 0)
+		/* integral with anti-windup: clamp to [0, pwm_max] so it never
+		 * winds up below the floor nor past what saturates the output */
+		integral += e;
+		if (integral > pwm_max)
+			integral = pwm_max;
+		else if (integral < 0)
 			integral = 0;
-		else if (e < WINDUP_RESET)
-			integral = 0;
-		else
-			integral = cand;
 
-		/* incremental PID: derivative on the 2nd difference of error */
-		float d = (float)(e - 2 * e1 + e2);
-		float u = kp * (float)e - kd * d + ki * (float)integral;
+		/* derivative on the first difference: rising temp -> more fan */
+		int derivative = e - e_prev;
+
+		float u = kp * (float)e + ki * (float)integral + kd * (float)derivative;
 
 		if (u > (float)pwm_max)
 			u = (float)pwm_max;
@@ -249,17 +298,15 @@ int main(int argc, char **argv)
 			set_fan_pwm((unsigned)u);
 			prev_out = u;
 		} else if (prev_out != 0.0f) {
-			/* first iteration commanding "off": hold before cutting */
+			/* first cycle commanding "off": hold before cutting */
 			sleep(SPINDOWN_HOLD);
 			set_fan_pwm(0);
 			prev_out = 0.0f;
 		}
 		/* else: already off, leave the fan alone */
 
-nap:
-		e2 = e1;
+		e_prev = e;
 		sleep(LOOP_PERIOD);
-		e1 = e;
 	}
 
 	return 0;

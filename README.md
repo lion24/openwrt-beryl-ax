@@ -85,24 +85,33 @@ The Beryl AX ships with a small vendor daemon (`gl_fan`) that drives the
 fan with a PID loop. Vanilla OpenWrt does not include it, so this image
 provides a clean-room reimplementation in the `gl-fan` package.
 
-It is the result of **reverse-engineering the stock `gl_fan` binary** to
-recover the control logic: the same PID algorithm, default setpoints
-(75 °C target), sysfs paths, and `glfan` UCI options as the vendor build.
-The source is compiled from scratch by the OpenWrt SDK during the image
-build — no vendor binary is shipped.
+It started as a **reverse-engineering of the stock `gl_fan` binary** to
+recover the control logic, then the loop was reworked into a standard
+positional PID (proportional + anti-windup integral + first-difference
+derivative), with the temperature divisor fixed to 1000 for millidegree
+thermal sysfs and the output bounded by the cooling device's `max_state`. The
+source is compiled from scratch by the OpenWrt SDK during the image build —
+no vendor binary is shipped.
+
+**The service is disabled by default.** On stock OpenWrt the kernel thermal
+governor (`step_wise`) already drives this fan via the device-tree thermal
+zone, so nothing extra is needed. `gl_fan` is provided for anyone who wants
+userspace control instead:
+
+- set `option enabled '1'` in `/etc/config/glfan`; the daemon then switches
+  `thermal_zone0` to the `user_space` governor on start and restores
+  `step_wise` when it exits — including on a crash signal — so the kernel
+  always regains control;
+- the fan has only 4 speeds (`cooling_device0`, states 0–3), so the defaults
+  are a simple proportional curve that ramps above `temperature` — off below
+  70 °C, then state 1 @70, 2 @80, 3 @90 °C. Lower `temperature` to spin up
+  sooner, raise `proportion` for a steeper ramp (`integration`/`differential`
+  default off — the fan is too coarse to benefit).
 
 The `-s` fan-speed readout uses the standard hwmon interface
-(`/sys/class/hwmon/hwmon*/fan1_input`) available on stock OpenWrt.
-
-Two caveats specific to vanilla OpenWrt:
-
-- the PWM ceiling comes from GL.iNet's `gl_fan_driver` kernel module, which
-  is **not present upstream**; the controller falls back to a safe default
-  ceiling of 120;
-- the loop drives the standard thermal `cooling_device0`, which the kernel
-  thermal governor may also manage — verify on-device whether you want
-  userspace control. The service is configured in `/etc/config/glfan` and
-  can be disabled there.
+(`/sys/class/hwmon/hwmon*/fan1_input`). The PWM ceiling prefers the cooling
+device's `max_state` and falls back to GL.iNet's `gl_fan_driver` node (absent
+upstream), then a constant.
 
 ## Flashing note
 
