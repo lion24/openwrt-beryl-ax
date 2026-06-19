@@ -7,6 +7,7 @@ travelmate
 -wpad-basic-mbedtls
 wpad-mbedtls
 
+# VPN
 wireguard-tools
 luci-proto-wireguard
 tailscale
@@ -22,11 +23,15 @@ tcpdump
 iperf3
 lsof
 
+# Alfa AWUS036ACM
 kmod-usb-core
 kmod-usb3
 kmod-mt76
 kmod-mt76-usb
 kmod-mt76x2u
+# Panda Wireless pau09 n600
+kmod-rt2800-usb
+kmod-rt2800-lib
 
 gl-fan
 
