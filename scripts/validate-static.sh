@@ -15,8 +15,19 @@ set -eu
 ARTIFACTS_DIR="${1:?usage: validate-static.sh <artifacts-dir>}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-PACKAGES_FILE="${REPO_ROOT}/packages.txt"
-UCI_DEFAULTS_DIR="${REPO_ROOT}/files/etc/uci-defaults"
+
+# Optional private site overlay (no-op unless SITE_DIR is set). Merge the
+# public + site files/ tree and package list into a throwaway dir so these
+# static checks cover exactly what the real image was built from.
+. "${SCRIPT_DIR}/site-overlay.sh"
+WORK_DIR="$(mktemp -d)"
+trap 'rm -rf "${WORK_DIR}"' EXIT
+
+site_merge_files "${REPO_ROOT}/files" "${WORK_DIR}/files"
+UCI_DEFAULTS_DIR="${WORK_DIR}/files/etc/uci-defaults"
+
+PACKAGES_FILE="${WORK_DIR}/packages.txt"
+site_merge_packages "${REPO_ROOT}/packages.txt" > "${PACKAGES_FILE}"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "  ok: $*"; }
