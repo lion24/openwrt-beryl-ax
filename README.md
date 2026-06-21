@@ -63,84 +63,62 @@ stack. If you want the GL.iNet web UI, the better option is to use official
 GL.iNet firmware. If you want a clean upstream OpenWrt system, this project
 takes the vanilla OpenWrt route instead.
 
-## Private site overlay (`SITE_DIR`)
+## Private site overlay
 
 Deployment-specific config — internal DNS overrides, VPN endpoints, network
 secrets — does not belong in this public image, and the **private image is never
-built here**. Instead, the device build is a single reusable script,
-[`scripts/build-image.sh`](scripts/build-image.sh), that both this repo's CI and
-a separate private repo run. The private build happens entirely in the private
-repo; this repo is consumed read-only as a pinned git submodule.
+built here**. The device build is a single reusable script,
+[`scripts/build-image.sh`](scripts/build-image.sh), run by both this repo's CI
+and a separate private repo. The private build happens entirely in that private
+repo, which consumes this one read-only as a pinned git submodule.
 
-`build-image.sh` layers an optional overlay when `SITE_DIR` points at a checkout
-that mirrors this layout:
+When the `SITE_DIR` environment variable points at a private checkout,
+`build-image.sh` merges that overlay on top of the public config before
+building. The overlay mirrors this repo's layout:
 
 ```
 $SITE_DIR/
-├── files/                     # same tree shape as ./files, merged on top
-│   └── etc/uci-defaults/99-site-*   # first-boot UCI patches (site wins on conflict)
-└── packages.site.txt          # optional extra packages, appended to packages.txt
+├── files/                          # same tree shape as ./files, merged on top
+│   └── etc/uci-defaults/99-site-*  # first-boot UCI patches (site wins on conflict)
+└── packages.site.txt               # optional extra packages, appended to packages.txt
 ```
 
 With `SITE_DIR` unset — how this repo's CI builds the public release — the merge
-is a transparent pass-through and the image is byte-for-byte unchanged. The merge
-itself lives in [`scripts/site-overlay.sh`](scripts/site-overlay.sh), shared by
-the device build, the QEMU build, and the static validator, so site files and
-packages are validated exactly as the public ones are.
+is a transparent pass-through and the image is byte-for-byte identical. The merge
+logic lives in [`scripts/site-overlay.sh`](scripts/site-overlay.sh) and is shared
+by the device build, the QEMU build, and the static validator, so site files and
+packages are built and validated exactly like the public ones.
 
-### Private repo layout
+### The private repo
+
+The private repo pins this one as an `upstream/` submodule and carries only the
+overlay plus its own build workflow:
 
 ```
-openwrt-beryl-ax-site/         # private
-├── upstream/                   # git submodule -> this public repo (pinned SHA)
-├── files/...                   # the overlay
-├── packages.site.txt           # optional
-└── .github/workflows/build.yml # builds + releases the private image
+openwrt-beryl-ax-site/             # private
+├── upstream/                      # git submodule -> this repo (pinned SHA)
+├── files/...                      # the overlay
+├── packages.site.txt              # optional
+└── .github/workflows/build.yml    # builds + releases the private image
 ```
 
-Add the submodule with:
+Set it up with:
 
 ```sh
 git submodule add https://github.com/<you>/openwrt-beryl-ax upstream
 ```
 
-### Private build workflow
+Its workflow checks out with `submodules: true`, then runs the upstream build
+script with `SITE_DIR` pointed at itself — so the private image is built and
+released only there:
 
-The private workflow checks out with submodules, then calls the **upstream**
-script with `SITE_DIR` pointed at the private checkout. The build runs — and the
-private image is stored — only in the private repo:
-
-```yaml
-# .github/workflows/build.yml (in the PRIVATE repo)
-name: Build private Beryl AX image
-on: { workflow_dispatch: {} }
-permissions: { contents: write }
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with: { submodules: true }   # pins upstream at the recorded SHA
-      - name: Install host dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential ca-certificates curl file gawk \
-            gettext git libncurses-dev libssl-dev python3 rsync unzip wget \
-            xsltproc zlib1g-dev zstd
-      - name: Build image with site overlay
-        env:
-          SITE_DIR: ${{ github.workspace }}      # this repo == the overlay
-        run: |
-          upstream/scripts/build-image.sh \
-            25.12.4 mediatek/filogic glinet_gl-mt3000 \
-            "${{ github.workspace }}/artifacts"
-      - uses: actions/upload-artifact@v4
-        with: { name: beryl-ax-private, path: artifacts/ }
-      # add a gh release step here to publish to the PRIVATE repo's releases
+```sh
+SITE_DIR="$GITHUB_WORKSPACE" \
+  upstream/scripts/build-image.sh 25.12.4 mediatek/filogic glinet_gl-mt3000 artifacts
 ```
 
-To bump to a newer public build, update the submodule: `cd upstream && git pull`
-then commit the new pointer.
+Bump to a newer public build by updating the submodule pointer
+(`cd upstream && git pull`, then commit).
 
 ## Wi-Fi defaults
 
