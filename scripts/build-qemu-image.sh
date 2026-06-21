@@ -25,6 +25,9 @@ OUT_DIR="${2:?usage: build-qemu-image.sh <openwrt-version> <out-dir>}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+# Optional private site overlay (no-op unless SITE_DIR is set).
+. "${SCRIPT_DIR}/site-overlay.sh"
+
 # Resolve OUT_DIR to an absolute path before we cd into the temp work dir,
 # otherwise a relative path would be written under (and deleted with) it.
 mkdir -p "${OUT_DIR}"
@@ -56,8 +59,14 @@ mkdir -p ib
 tar --use-compress-program=unzstd -xf "${IB_TARBALL}" -C ib --strip-components=1
 test -f ib/Makefile || { echo "ERROR: extracted ImageBuilder looks invalid"; exit 1; }
 
+# --- merge the optional site overlay into a throwaway files/ tree ----------
+MERGED_FILES="${WORK_DIR}/files"
+site_merge_files "${REPO_ROOT}/files" "${MERGED_FILES}"
+
 # --- derive the QEMU package set (drop hardware-specific kmods) ------------
-PACKAGES="$(sed 's/#.*//' "${REPO_ROOT}/packages.txt" \
+# The kmod-/gl-fan filter applies to site packages too: they can't be tested
+# in QEMU any more than the public ones can.
+PACKAGES="$(site_merge_packages "${REPO_ROOT}/packages.txt" \
   | grep -v '^[[:space:]]*$' \
   | grep -v '^kmod-' \
   | grep -v '^gl-fan[[:space:]]*$' \
@@ -69,7 +78,7 @@ echo "-- running ImageBuilder"
 make -C ib image \
   PROFILE="generic" \
   PACKAGES="${PACKAGES}" \
-  FILES="${REPO_ROOT}/files"
+  FILES="${MERGED_FILES}"
 
 # --- collect the ext4-combined disk image ---------------------------------
 IMG_GZ="$(find ib/bin/targets/${TARGET} -type f -name '*ext4-combined*.img.gz' | head -n 1)"

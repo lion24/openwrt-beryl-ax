@@ -59,254 +59,37 @@ jobs:
             zlib1g-dev \
             zstd
 
-      - name: Prepare ImageBuilder variables
+      - name: Prepare cache variables
         shell: bash
         run: |
           set -euo pipefail
-
-          TARGET_SLUG="${TARGET/\//-}"
-          IB_TARBALL="openwrt-imagebuilder-${OPENWRT_VERSION}-${TARGET_SLUG}.Linux-x86_64.tar.zst"
-          IB_CACHE_DIR="${GITHUB_WORKSPACE}/.cache/imagebuilder/${OPENWRT_VERSION}/${TARGET_SLUG}"
-          BASE_URL="https://downloads.openwrt.org/releases/${OPENWRT_VERSION}/targets/${TARGET}"
-
-          echo "TARGET_SLUG=${TARGET_SLUG}" >> "$GITHUB_ENV"
-          echo "IB_TARBALL=${IB_TARBALL}" >> "$GITHUB_ENV"
-          echo "IB_CACHE_DIR=${IB_CACHE_DIR}" >> "$GITHUB_ENV"
-          echo "BASE_URL=${BASE_URL}" >> "$GITHUB_ENV"
+          echo "TARGET_SLUG=${TARGET/\//-}" >> "$GITHUB_ENV"
 
       - name: Restore cached ImageBuilder
-        id: cache-imagebuilder
         uses: actions/cache@v4
         with:
           path: .cache/imagebuilder/${{ inputs.openwrt_version }}/${{ env.TARGET_SLUG }}
           key: imagebuilder-${{ runner.os }}-${{ inputs.openwrt_version }}-${{ env.TARGET_SLUG }}-${{ inputs.cache_epoch }}
 
-      - name: Download, verify, and extract ImageBuilder
-        if: steps.cache-imagebuilder.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p "${IB_CACHE_DIR}"
-
-          curl -fSLO "${BASE_URL}/sha256sums"
-          curl -fSLO "${BASE_URL}/${IB_TARBALL}"
-
-          EXPECTED_SHA="$(grep -F "${IB_TARBALL}" sha256sums | awk '{print $1}' | head -n 1)"
-
-          if [ -z "${EXPECTED_SHA}" ]; then
-            echo "ERROR: could not find checksum for ${IB_TARBALL}"
-            grep -F "imagebuilder" sha256sums || true
-            exit 1
-          fi
-
-          ACTUAL_SHA="$(sha256sum "${IB_TARBALL}" | awk '{print $1}')"
-
-          echo "Expected: ${EXPECTED_SHA}"
-          echo "Actual:   ${ACTUAL_SHA}"
-
-          if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
-            echo "ERROR: checksum mismatch"
-            exit 1
-          fi
-
-          echo "Checksum OK"
-
-          tar --use-compress-program=unzstd -xf "${IB_TARBALL}" -C "${IB_CACHE_DIR}" --strip-components=1
-
-      - name: Set ImageBuilder directory
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -f "${IB_CACHE_DIR}/Makefile" || {
-            echo "ERROR: ImageBuilder cache dir is invalid: ${IB_CACHE_DIR}"
-            ls -lah "${IB_CACHE_DIR}" || true
-            exit 1
-          }
-
-          echo "IB_DIR=${IB_CACHE_DIR}" >> "$GITHUB_ENV"
-
-      - name: Prepare SDK variables
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          SDK_CACHE_DIR="${GITHUB_WORKSPACE}/.cache/sdk/${OPENWRT_VERSION}/${TARGET_SLUG}"
-
-          echo "SDK_CACHE_DIR=${SDK_CACHE_DIR}" >> "$GITHUB_ENV"
-
       - name: Restore cached SDK
-        id: cache-sdk
         uses: actions/cache@v4
         with:
           path: .cache/sdk/${{ inputs.openwrt_version }}/${{ env.TARGET_SLUG }}
           key: sdk-${{ runner.os }}-${{ inputs.openwrt_version }}-${{ env.TARGET_SLUG }}-${{ inputs.cache_epoch }}
-
-      - name: Download, verify, and extract SDK
-        if: steps.cache-sdk.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p "${SDK_CACHE_DIR}"
-
-          curl -fSLO "${BASE_URL}/sha256sums"
-
-          # The SDK tarball name carries a toolchain suffix (e.g.
-          # ..._gcc-13.3.0_musl...), so read the exact name from sha256sums
-          # rather than constructing it.
-          SDK_TARBALL="$(grep -oE 'openwrt-sdk-[^ ]*Linux-x86_64\.tar\.(zst|xz)' sha256sums | head -n 1)"
-          [ -n "${SDK_TARBALL}" ] || { echo "ERROR: no SDK tarball listed in sha256sums"; exit 1; }
-          echo "SDK tarball: ${SDK_TARBALL}"
-
-          curl -fSLO "${BASE_URL}/${SDK_TARBALL}"
-
-          EXPECTED_SHA="$(grep -F "${SDK_TARBALL}" sha256sums | awk '{print $1}' | head -n 1)"
-          ACTUAL_SHA="$(sha256sum "${SDK_TARBALL}" | awk '{print $1}')"
-
-          echo "Expected: ${EXPECTED_SHA}"
-          echo "Actual:   ${ACTUAL_SHA}"
-
-          if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
-            echo "ERROR: SDK checksum mismatch"
-            exit 1
-          fi
-
-          echo "SDK checksum OK"
-
-          case "${SDK_TARBALL}" in
-            *.tar.zst) tar --use-compress-program=unzstd -xf "${SDK_TARBALL}" -C "${SDK_CACHE_DIR}" --strip-components=1 ;;
-            *.tar.xz)  tar -xJf "${SDK_TARBALL}" -C "${SDK_CACHE_DIR}" --strip-components=1 ;;
-            *) echo "ERROR: unknown SDK archive format: ${SDK_TARBALL}"; exit 1 ;;
-          esac
-
-      - name: Build gl-fan package with the SDK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -f "${SDK_CACHE_DIR}/rules.mk" || {
-            echo "ERROR: SDK cache dir is invalid: ${SDK_CACHE_DIR}"
-            ls -lah "${SDK_CACHE_DIR}" || true
-            exit 1
-          }
-
-          # Drop our package into the SDK tree and cross-compile it.
-          rm -rf "${SDK_CACHE_DIR}/package/gl-fan"
-          cp -r "${GITHUB_WORKSPACE}/package/gl-fan" "${SDK_CACHE_DIR}/package/gl-fan"
-
-          make -C "${SDK_CACHE_DIR}" defconfig
-          make -C "${SDK_CACHE_DIR}" package/gl-fan/compile V=s
-
-          echo "Built package(s):"
-          find "${SDK_CACHE_DIR}/bin" -type f \( -name 'gl-fan_*.ipk' -o -name 'gl-fan-*.apk' \) -print
-
-      - name: Stage gl-fan into the ImageBuilder package repo
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p "${IB_DIR}/packages"
-
-          # ImageBuilder reads user packages from its local PACKAGE_DIR
-          # (<imagebuilder>/packages). The apk-based ImageBuilder regenerates
-          # the local index automatically (apk mkndx --allow-untrusted) when it
-          # finds files there newer than packages.adb, so a plain copy suffices.
-          # Stage whichever format the SDK produced (.apk on 25.12+, .ipk on opkg).
-          found=""
-          while IFS= read -r pkg; do
-            cp -v "${pkg}" "${IB_DIR}/packages/"
-            found=1
-          done < <(find "${SDK_CACHE_DIR}/bin" -type f \( -name 'gl-fan_*.ipk' -o -name 'gl-fan-*.apk' \))
-
-          [ -n "${found}" ] || { echo "ERROR: no gl-fan package was produced by the SDK"; exit 1; }
 
       - name: Build image
         shell: bash
         run: |
           set -euo pipefail
 
-          # Strip comments (# ... ) and blank lines before flattening, otherwise
-          # comment words leak into the package list and break the build.
-          PACKAGES="$(sed 's/#.*//' packages.txt | tr '\n' ' ')"
-
-          make -C "${IB_DIR}" image \
-            PROFILE="${PROFILE}" \
-            PACKAGES="${PACKAGES}" \
-            FILES="${GITHUB_WORKSPACE}/files"
-
-      - name: Collect release artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          rm -rf artifacts
-          mkdir -p artifacts
-
-          echo "Collecting custom ImageBuilder artifacts..."
-
-          find "${IB_DIR}/bin/targets" -type f \
-            \( -name "*gl-mt3000*sysupgrade*" \
-            -o -name "*gl-mt3000*factory*" \
-            -o -name "*.manifest" \
-            -o -name "profiles.json" \
-            -o -name "sha256sums" \) \
-            -exec cp -v {} artifacts/ \;
-
-          if [ -f artifacts/sha256sums ]; then
-            mv artifacts/sha256sums artifacts/custom-build-sha256sums.txt
-          fi
-
-          # Include the locally-built gl-fan package in the release.
-          find "${IB_DIR}/packages" -maxdepth 1 -type f \
-            \( -name "gl-fan-*.apk" -o -name "gl-fan_*.ipk" \) \
-            -exec cp -v {} artifacts/ \;
-
-          ls artifacts/gl-fan* >/dev/null 2>&1 \
-            || { echo "ERROR: gl-fan package missing from artifacts"; exit 1; }
-
-          echo "Downloading official OpenWrt GL-MT3000 initramfs recovery image..."
-
-          OFFICIAL_SUMS="/tmp/openwrt-official-sha256sums"
-          INITRAMFS_FILE="openwrt-${OPENWRT_VERSION}-${TARGET_SLUG}-glinet_gl-mt3000-initramfs-kernel.bin"
-
-          curl -fSL "${BASE_URL}/sha256sums" -o "${OFFICIAL_SUMS}"
-
-          if grep -F "${INITRAMFS_FILE}" "${OFFICIAL_SUMS}" >/dev/null; then
-            curl -fSL "${BASE_URL}/${INITRAMFS_FILE}" -o "artifacts/${INITRAMFS_FILE}"
-
-            EXPECTED_SHA="$(grep -F "${INITRAMFS_FILE}" "${OFFICIAL_SUMS}" | awk '{print $1}' | head -n 1)"
-            ACTUAL_SHA="$(sha256sum "artifacts/${INITRAMFS_FILE}" | awk '{print $1}')"
-
-            echo "Official initramfs expected SHA: ${EXPECTED_SHA}"
-            echo "Official initramfs actual SHA:   ${ACTUAL_SHA}"
-
-            if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
-              echo "ERROR: official initramfs checksum mismatch"
-              exit 1
-            fi
-
-            echo "Official initramfs checksum OK"
-          else
-            echo "WARNING: official initramfs image not found: ${INITRAMFS_FILE}"
-            echo "Continuing without initramfs artifact."
-          fi
-
-          (
-            cd artifacts
-            sha256sum * > release-sha256sums.txt
-          )
+          # Single source of truth for the device build (shared with the private
+          # site repo). Public build: no SITE_DIR, so the overlay is a no-op.
+          ./scripts/build-image.sh \
+            "${OPENWRT_VERSION}" "${TARGET}" "${PROFILE}" \
+            "${GITHUB_WORKSPACE}/artifacts" \
+            "${GITHUB_WORKSPACE}/.cache"
 
           echo "Release assets:"
-          find artifacts -maxdepth 1 -type f -printf '%f\n' | sort
-
-          echo "Checking required custom sysupgrade image..."
-          find artifacts -maxdepth 1 -type f -name "*gl-mt3000*sysupgrade*" | grep .
-
-          echo "Checking optional official initramfs image..."
-          find artifacts -maxdepth 1 -type f -name "*gl-mt3000*initramfs*" || true
-
           ls -lah artifacts
 
       - name: Upload firmware artifacts
