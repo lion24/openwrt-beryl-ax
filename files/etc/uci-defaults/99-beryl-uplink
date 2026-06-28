@@ -4,7 +4,8 @@
 # via travelmate. This lays only the plumbing:
 #   - the trm_wwan DHCP interface travelmate manages,
 #   - its membership in the wan firewall zone (NAT + untrusted),
-#   - travelmate's global section, armed.
+#   - travelmate's global section, armed,
+#   - dnsmasq DNS rebind protection off (so captive portals resolve).
 #
 # It deliberately does NOT configure any upstream SSID/key: those are
 # location-specific secrets that must be added at runtime
@@ -35,8 +36,15 @@ uci -q get travelmate.global >/dev/null || uci set travelmate.global='travelmate
 uci set travelmate.global.trm_iface='trm_wwan'
 uci set travelmate.global.trm_enabled='1'
 
+# 4. Disable dnsmasq DNS rebind protection globally. Captive portals routinely
+#    resolve their gateway to a private/loopback address; rebind protection
+#    treats that as an attack and drops the answer, so the portal never loads.
+#    Travelmate cannot work around this on its own, so we turn it off here.
+uci set dhcp.@dnsmasq[0].rebind_protection='0'
+
 uci commit network
 uci commit firewall
 uci commit travelmate
+uci commit dhcp
 
 exit 0
